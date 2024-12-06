@@ -1,0 +1,780 @@
+---
+title: "Framing in the MLB"
+author: "Ben Ellman"
+date: "2024-08-07"
+output: html_document
+---
+
+#load packages
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(ggrepel)
+if (!requireNamespace('pacman', quietly = TRUE)){
+  install.packages('pacman')
+}
+pacman::p_load_current_gh("billpetti/baseballr")
+
+#load in baseball savant called strike data by player name and pitch type
+catchers_1 <- read.csv("MLB Framing/outside_zone_3.28-4.13.csv")
+catchers_2 <- read.csv("MLB Framing/outside_zone_4.14-4.29.csv")
+catchers_3 <- read.csv("MLB Framing/outside_zone_4.30-5.15.csv")
+catchers_4 <- read.csv("MLB Framing/outside_zone_5.16-5.31.csv")
+catchers_5 <- read.csv("MLB Framing/outside_zone_6.1-6.17.csv")
+catchers_6 <- read.csv("MLB Framing/outside_zone_6.18-7.4.csv")
+catchers_7 <- read.csv("MLB Framing/outside_zone_7.5-7.20.csv")
+catchers_8 <- read.csv("MLB Framing/outside_zone_7.21-8.5.csv")
+catchers_9 <- read.csv("MLB Framing/outside_zone_8.6-8.21.csv")
+catchers_10 <- read.csv("MLB Framing/outside_zone_8.22-9.5.csv")
+catchers_11 <- read.csv("MLB Framing/outside_zone_9.6-9.20.csv")
+catchers_12 <- read.csv("MLB Framing/outside_zone_9.21-.csv")
+
+
+catchers <- catchers_1 %>%
+bind_rows(catchers_2,
+catchers_3,
+catchers_4,
+catchers_5,
+catchers_6,
+catchers_7,
+catchers_8,
+catchers_9,
+catchers_10,
+catchers_11,
+catchers_12)
+
+#remove catcher_x dataframes after merge
+rm(list = ls()[grepl('catchers_.',ls())])
+
+#simple framing analysis
+catchers %>%
+group_by(player_name) %>%
+summarize(frames = sum(ifelse(description=="called_strike",1,0)), 
+frame_ratio = sum(ifelse(description=="called_strike",1,0))/n(),
+total_balls = n()
+) %>%
+arrange(desc(frames))
+
+#pitch classification
+catchers <- catchers %>%
+mutate(pitch_class = case_when(
+stand == "L" & plate_x <= 0 & plate_z <= 2.5 ~ "LO",
+stand == "R" & plate_x >= 0 & plate_z <= 2.5 ~ "LO",
+stand == "L" & plate_x <= 0 & plate_z >= 2.5 ~ "HO",
+stand == "R" & plate_x >= 0 & plate_z >= 2.5 ~ "HO",
+stand == "L" & plate_x >= 0 & plate_z <= 2.5 ~ "LI",
+stand == "R" & plate_x <= 0 & plate_z <= 2.5 ~ "LI",
+stand == "L" & plate_x > 0 & plate_z > 2.5 ~ "HI",
+stand == "R" & plate_x < 0 & plate_z > 2.5 ~ "HI",
+TRUE ~ "NA")
+)
+
+#frames based on relative ball location (i.e., most drastic frames vs. near misses)
+#quantify near misses based on called_strike locations to identify plate distance
+catchers %>%
+filter(plate_x < 0,plate_z > 2, plate_z < 3) %>%
+summarize(min_plate_width = max(plate_x))
+
+catchers %>%
+filter(plate_x > 0,plate_z > 2, plate_z < 2.7) %>%
+summarize(min_plate_width = min(plate_x))
+#plate width has a range of (-0.83,0.83) in plate_x variable
+#estimating with plot, plate height has range of (1.5,3.5)
+
+#near miss should be outside the zone, but not more than one ball width out
+#plate = 17 in, baseball = ~2.9 in; [(0.83+0.83-b)/17]*2.9 = b -> b = ~0.24 units across plate_x for each ball, or .08 units per inch
+#near miss will be plate_x >= -1 & plate_x <= 1, plate_z >= 1.35 & plate_z <= 3.7; anything outside of that is a "robbery"
+catchers <- catchers %>%
+mutate(frame_class = case_when(
+description == 'called_strike' & plate_x >= -1 & plate_x <= 1 & plate_z >= 1.35 & plate_z <= 3.7 ~ "nm_frame",
+description == 'called_strike' & (plate_x <= -1 | plate_x >= 1 | plate_z <= 1.35 | plate_z >= 3.7) ~ "robbery",
+description == 'ball' ~ "ball",
+TRUE ~ "NA"
+))
+
+catchers %>%
+group_by(player_name) %>%
+summarize(
+tot_frames = sum(ifelse(frame_class != 'ball',1,0)),
+robberies = sum(ifelse(frame_class == "robbery",1,0)),
+frame_perc = 100*sum(ifelse(frame_class != 'ball',1,0))/n(),
+total_balls = n()
+) %>%
+arrange(desc(robberies))
+
+#frames on different pitch types
+catchers %>%
+group_by(pitch_type) %>%
+summarize(tot_frames = sum(ifelse(frame_class != 'ball',1,0)),
+robberies = sum(ifelse(frame_class == "robbery",1,0)),
+frame_perc = 100*sum(ifelse(frame_class != 'ball',1,0))/n(),
+total_balls = n()
+) %>%
+arrange(desc(frame_perc))
+
+#frames on different zones... what location is most likely to be framed successfully?
+catchers <- catchers %>%
+mutate(zone = as_factor(zone))
+
+catchers %>%
+group_by(pitch_class) %>%
+summarize(tot_frames = sum(ifelse(frame_class != 'ball',1,0)),
+robberies = sum(ifelse(frame_class == "robbery",1,0)),
+frame_perc = 100*sum(ifelse(frame_class != 'ball',1,0))/n(),
+total_balls = n()
+) %>%
+arrange(desc(frame_perc))
+
+catchers %>%
+filter(description == "called_strike") %>%
+ggplot(aes(x=plate_x, y=plate_z)) + 
+geom_point(aes(color = pitch_class)) +
+labs(title = 'Plate location of framed pitches (catcher P.O.V) second half 2024')
+
+#to see missed strikes and approximate zone better, bring in strike data froms statcast using same query as above w/ strike zone instead of outside zone filter
+catcher_strikes_1 <- read_csv("MLB Framing/In_zone_3.28-4.25.csv")
+catcher_strikes_2 <- read_csv("MLB Framing/In_zone_5.4-6.4.csv")
+catcher_strikes_3 <- read_csv("MLB Framing/In_StrikeZone_Statcast_6.5-7.18.csv")
+catcher_strikes_4 <- read_csv("MLB Framing/In_StrikeZone_Statcast_7.19-8.20.csv")
+catcher_strikes_5 <- read_csv("MLB Framing/In_StrikeZone_Statcast_8.21-9.30.csv")
+
+
+catcher_strikes <- bind_rows(catcher_strikes_1,
+catcher_strikes_2,
+catcher_strikes_3,
+catcher_strikes_4,
+catcher_strikes_5)
+
+rm(list = ls()[grepl("catcher_strikes_.",ls())])
+
+#clean data (changing column types)
+catcher_strikes <- catcher_strikes %>%
+mutate(game_date = as.character(game_date),
+zone = as.factor(zone))
+
+#plate width based on strike data
+catcher_strikes %>%
+summarize(min_x = min(plate_x), max_x = max(plate_x))
+#(-0.83,0.83)
+
+#plot strikes
+catcher_strikes %>%
+ggplot(aes(x=plate_x, y=plate_z)) +
+geom_point(aes(color=description))
+#plate height about (1.5,3.75)
+
+#analyze "missed" frames to see worst catchers and combine w/ framing findings; add frame_class and pitch_class variables for easy merging and analysis based on result of pitch {frame (true ball or ~2 inch from ball that is called a strike), miss (true strike called a ball), "true" ball, "true" strike, etc.}
+catcher_strikes <- catcher_strikes %>%
+mutate(frame_class = case_when(
+description == 'called_strike' & (plate_x <= -0.7 | plate_x >= 0.7 | plate_z <= 1.65 | plate_z >= 3.5) ~ "frame",
+description == 'ball' ~ "miss",
+TRUE ~ "strike"
+))
+
+catcher_strikes <- catcher_strikes %>%
+mutate(pitch_class = case_when(
+stand == "L" & plate_x <= 0 & plate_z <= 2.5 ~ "LO",
+stand == "R" & plate_x >= 0 & plate_z <= 2.5 ~ "LO",
+stand == "L" & plate_x <= 0 & plate_z >= 2.5 ~ "HO",
+stand == "R" & plate_x >= 0 & plate_z >= 2.5 ~ "HO",
+stand == "L" & plate_x >= 0 & plate_z <= 2.5 ~ "LI",
+stand == "R" & plate_x <= 0 & plate_z <= 2.5 ~ "LI",
+stand == "L" & plate_x > 0 & plate_z > 2.5 ~ "HI",
+stand == "R" & plate_x < 0 & plate_z > 2.5 ~ "HI",
+TRUE ~ "NA")
+)
+
+#called_strike frame zone analysis plot
+catcher_strikes %>%
+filter(frame_class != "strike") %>%
+ggplot(aes(x=plate_x,y=plate_z)) +
+geom_point(aes(color=frame_class))
+
+#called_strike "miss" (true strike called ball) zone analysis plot 
+catcher_strikes %>%
+filter(frame_class == "miss") %>%
+ggplot(aes(x=plate_x,y=plate_z)) +
+geom_point(aes(color=pitch_class))
+
+#bind catchers (out of zone) and catcher_strikes (in zone) (frame_24 dataframe)
+frame_24 <- bind_rows(catchers, catcher_strikes)
+
+#best framers of 2024 summary of frame_24
+best_sum_24 <- frame_24 %>%
+group_by(player_name) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+frame_perc = 100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()),
+miss_perc = 100*sum(ifelse(frame_class == 'miss',1,0))/
+sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+total_pitches = n()
+) %>%
+filter(total_pitches >= 1500) %>%
+arrange(desc(frame_perc))
+
+best_sum_24 <- best_sum_24 %>%
+mutate(frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc))
+
+best_sum_24 <- best_sum_24[,c(1,7,8,2:6)]
+
+best_sum_24 <- best_sum_24 %>% arrange(desc(frame_z))
+
+#worst framers according to frame_24
+worst_sum_24 <- best_sum_24 %>%
+arrange(desc(miss_z))
+
+#frame_z vs miss_z graphic
+best_sum_24 %>%
+ggplot(aes(x=frame_z,y=miss_z)) +
+geom_point(aes(color = player_name), show.legend = FALSE) +
+geom_label(aes(label=player_name), size = 3, nudge_y = -0.125) +
+labs(x = "Framing z-score", y = "Misses z-score (lower = less misses)", title = "Relative Frames vs Misses of Catchers 2024", subtitle = "> 1500 frameable pitches seen")
+
+#game-level summary
+games_most_impacted <- frame_24 %>%
+group_by(game_date,player_name) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+frame_perc = 100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()),
+miss_perc = 100*sum(ifelse(frame_class == 'miss',1,0))/
+sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+total_pitches = n()) %>%
+arrange(desc(tot_frames))
+
+#STATCAST DATA to get expected run values based on count to arrive at defensive framing runs saved for catchers -- has count info, outs, pitch result (to get diff btw ball vs strike), pre-pitch score and post-pitch score
+plays_1 <- read.csv("MLB Framing/2024 Plays download/3.28 - 4.21.csv")
+plays_2 <- read.csv("MLB Framing/2024 Plays download/4.22 - 5.16.csv")
+plays_3 <- read.csv("MLB Framing/2024 Plays download/5.17 - 6.10.csv")
+plays_4 <- read.csv("MLB Framing/2024 Plays download/6.11 - 7.04.csv")
+plays_5 <- read.csv("MLB Framing/2024 Plays download/7.05 - 7.31.csv")
+plays_6 <- read.csv("MLB Framing/2024 Plays download/8.01 - 8.22.csv")
+plays_7 <- read.csv("MLB Framing/2024 Plays download/8.23 - 9.10.csv")
+plays_8 <- read.csv("MLB Framing/2024 Plays download/9.11 - 9.30.csv")
+
+plays_24 <- rbind(plays_1,
+plays_2,
+plays_3,
+plays_4,
+plays_5,
+plays_6,
+plays_7,
+plays_8)
+
+rm(list = ls()[grepl('plays_[0-9]$',ls())])
+
+#classify out-count-baserunner state for each situation
+plays_24 <- plays_24 %>%
+mutate(out_state = outs_when_up,
+count = paste(balls,strikes,sep = '-'),
+base_state = case_when(
+!is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "bases_loaded",
+!is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "first_second",
+!is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "first_third",
+is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "second_third",
+!is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "first",
+is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "second",
+is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "third",
+is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "empty",
+TRUE ~ NA
+)
+)
+
+#classify result of AB (if run(s) scored); determine if more specificity needed
+plays_24 <- plays_24 %>%
+mutate(
+runs_scored = post_bat_score - bat_score,
+count_out_base = paste(count,out_state,base_state,sep = ','),
+out_base = paste(out_state,base_state,sep = ' outs, '))
+
+#clean unnecessary columns from plays_24
+plays_24_tidy <- plays_24 %>%
+select(c(pitch_type, game_date, player_name, pitcher, events, description, zone, des, stand, p_throws, home_team, away_team, type, bb_type, plate_x, plate_z, inning, inning_topbot, estimated_woba_using_speedangle, at_bat_number, bat_score, post_bat_score, delta_run_exp, out_state, count, base_state, runs_scored, count_out_base, out_base))
+
+#group innings in each game for each team to get exp runs per inn
+plays_24_tidy <- plays_24_tidy %>%
+group_by(game_date,home_team,inning,inning_topbot) %>%
+mutate(inning_id = cur_group_id(),
+inn_runs_scored = runs_scored) %>%
+ungroup() %>%
+group_by(inning_id) %>%
+arrange(inning_id,desc(at_bat_number)) %>%
+mutate(inn_runs_scored = cumsum(runs_scored)) %>%
+ungroup()
+
+#get exp run prob for rest of inning 
+out_base_inn <- plays_24_tidy %>%
+group_by(out_base) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), 
+runs = sum(inn_runs_scored),
+median_runs = median(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+count_inn <- plays_24_tidy %>%
+group_by(count) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn) %>%
+filter(substr(count,1,1) != '4')
+
+base_inn <- plays_24_tidy %>%
+group_by(base_state) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+out_inn <- plays_24_tidy %>%
+group_by(out_state) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+count_out_base_inn <- plays_24_tidy %>%
+group_by(count_out_base) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+#plot of out-baserunner state expected runs per inning
+plays_24_tidy %>%
+group_by(out_base) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn) %>%
+ggplot(aes(x=exp_runs_per_inn,y= fct_reorder(out_base,exp_runs_per_inn))) +
+geom_col(fill = 'maroon') +
+geom_label(aes(label = round(exp_runs_per_inn,digits=2)), size = 3, nudge_y = -0.025) +
+labs(x = 'Expected runs per inning',
+y= 'Out, baserunner state',
+title = 'Expected runs for each out-baserunner state in 2024 MLB games')
+
+#plot of expected runs by count per inning
+plays_24_tidy %>%
+group_by(count) %>%
+filter(count != '4-2') %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn) %>%
+ggplot(aes(x=exp_runs_per_inn,y= fct_reorder(count,exp_runs_per_inn))) +
+geom_col(fill = 'navy') +
+geom_label(aes(label = round(exp_runs_per_inn,digits=2)), size = 3, nudge_y = -0.025) +
+labs(x = 'Expected runs per inning',
+y= 'At-bat count',
+title = 'Expected runs for each batter count in 2024 MLB games')
+
+#combine exp run analysis with frame_24 to get change in run expectancy per frame
+#since exp runs in each count should give indication of "added" expected runs relative to every other count, use this to develop relative drop in run expectancy given the result of the pitch -- also to prevent bias from making pitches that resulted in strike out/walk count more due to change in out-baserunner state in addition to count, will be in separate analysis
+frame_24_tidy <- frame_24 %>%
+mutate(count = paste(balls, strikes, sep='-'),
+base_state = case_when(
+      !is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "bases_loaded",
+      !is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "first_second",
+      !is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "first_third",
+      is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "second_third",
+      !is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "first",
+      is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "second",
+      is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "third",
+      is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "empty",
+      TRUE ~ NA
+),
+outs = outs_when_up,
+post_balls = if_else(description == 'ball', balls + 1, balls),
+post_strikes = if_else(description == 'called_strike', strikes + 1, strikes),
+post_count = paste(post_balls, post_strikes, sep='-')) %>%
+select(c(pitch_type, game_date, player_name, pitcher, events, description, zone, des,
+stand, p_throws, home_team, away_team, type, plate_x, plate_z, inning, inning_topbot, at_bat_number, pitch_number, pitch_name, bat_score, fld_score, post_bat_score,delta_run_exp, pitch_class, frame_class, count, base_state, outs, post_count)) %>%
+left_join(count_inn, by = 'count') %>%
+left_join(count_inn, by = c('post_count' = 'count')) %>%
+mutate(run_exp_change = exp_runs_per_inn.y - exp_runs_per_inn.x) %>%
+select(-starts_with("exp_runs_per_inn."), -starts_with("runs."), -starts_with("n."))
+
+#incorporate baserunner change due to walk from misses using only change in base runner for walks to get change in run expectancy
+base_inn <- base_inn %>%
+bind_rows(
+data.frame(base_state = 'scored', exp_runs_per_inn = 2.3210122, runs = NA, n = NA)
+)
+
+frame_24_tidy <- frame_24_tidy %>%
+mutate(post_base_state = case_when(
+  substr(post_count,1,1) == '4' & base_state == 'empty' ~ 'first',
+  substr(post_count,1,1) == '4' & base_state == 'first' ~ 'first_second',
+  substr(post_count,1,1) == '4' & base_state == 'second' ~ 'first_second',
+  substr(post_count,1,1) == '4' & base_state == 'third' ~ 'first_third',
+  substr(post_count,1,1) == '4' & base_state == 'first_second' ~ 'bases_loaded',
+  substr(post_count,1,1) == '4' & base_state == 'first_third' ~ 'bases_loaded',
+  substr(post_count,1,1) == '4' & base_state == 'second_third' ~ 'bases_loaded',
+  substr(post_count,1,1) == '4' & base_state == 'bases_loaded' ~ 'scored',
+  TRUE ~ base_state
+)) %>%
+left_join(base_inn, by = 'base_state') %>%
+left_join(base_inn, by = c('post_base_state' = 'base_state')) %>%
+mutate(run_exp_change = ifelse(substr(post_count,1,1) == '4',exp_runs_per_inn.y - exp_runs_per_inn.x,run_exp_change)) %>%
+select(-starts_with("exp_runs_per_inn."), -starts_with("runs."), -starts_with("n."))
+
+#incorporate out-run expectancy change when strikeout occurs to reward frames on strikeout pitches 
+frame_24_tidy <- frame_24_tidy %>%
+mutate(post_outs = case_when(
+  substr(post_count,3,3) == '3' & outs == 0 ~ 1,
+  substr(post_count,3,3) == '3' & outs == 1 ~ 2,
+  substr(post_count,3,3) == '3' & outs == 2 ~ 3,
+  TRUE ~ outs)) %>%
+left_join(out_inn, by = c('outs' = 'out_state')) %>%
+left_join(out_inn, by = c('post_outs' = 'out_state')) %>%
+mutate(run_exp_change = ifelse(substr(post_count,3,3) == '3', exp_runs_per_inn.y - exp_runs_per_inn.x,run_exp_change)) %>%
+select(-starts_with("exp_runs_per_inn."), -starts_with("runs."), -starts_with("n.")) %>%
+mutate(run_exp_change = ifelse(post_outs == 3, -0.25, run_exp_change)) 
+#set third out change equal to change from 1 to 2 outs
+
+#exp_run_added_2 looks at marginal change in run expecatancy due to change in count-out-base runner state for each situation -- 3 outs means 0 expected runs per inning
+frame_24_tidy <- frame_24_tidy %>%
+mutate(post_base_state = ifelse(post_base_state == 'scored', 'bases_loaded', post_base_state),
+post_count_2 = ifelse(substr(post_count,1,1)=='4'|substr(post_count,3,3)=='3','0-0',post_count)) %>%
+mutate(count_out_base = paste(count,outs,base_state,sep=','),
+post_count_out_base = paste(post_count_2,post_outs,post_base_state,sep=',')) %>%
+left_join(count_out_base_inn, by=c('count_out_base' = 'count_out_base')) %>%
+left_join(count_out_base_inn, by=c('post_count_out_base' = 'count_out_base')) %>%
+mutate(exp_runs_per_inn.y = ifelse(post_outs==3,0,exp_runs_per_inn.y),
+exp_run_added_2 = exp_runs_per_inn.y - exp_runs_per_inn.x) %>%
+select(-starts_with("exp_runs_per_inn."), -starts_with("runs."), -starts_with("n."))
+
+#should be filtering above for misses and frames only (to not punish catchers for balls or reward for strikes)
+frame_24_tidy <- frame_24_tidy %>%
+mutate(edit_run_exp_change = case_when(
+frame_class == 'ball' ~ NA,
+frame_class == 'strike' ~ NA,
+TRUE ~ run_exp_change),
+edit_run_exp_change_2 = case_when(
+frame_class == 'ball' ~ NA,
+frame_class == 'strike' ~ NA,
+TRUE ~ exp_run_added_2))
+
+#improve best_sum_24 w/ added run_exp_change summary for each catcher
+best_sum_24 <- frame_24_tidy %>%
+group_by(player_name) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(edit_run_exp_change_2, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(edit_run_exp_change_2, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(best_sum_24$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(best_sum_24$exp_run_added_per_pitch, na.rm=TRUE)
+
+best_sum_24 <- best_sum_24 %>%
+mutate(exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 1500) %>%
+arrange(exp_run_added)
+
+#plots and summary of error between exp_run_added, exp_run_added_2 and Statcast change in runs expected estimates
+frame_24_tidy %>% 
+mutate(run_err = exp_run_added_2 - delta_run_exp,
+run_err_2 = exp_run_added_3 - delta_run_exp) %>% 
+ungroup() %>%
+group_by(frame_class) %>%
+mutate(mean_run_err_class = mean(run_err, na.rm=TRUE)) %>%
+arrange(frame_class) %>%
+ggplot() +
+geom_point(aes(y=run_err, x = frame_class, color = frame_class), show.legend = FALSE, na.rm = TRUE) +
+geom_line(aes(x=frame_class, y=mean_run_err_class, group=1), color = 'red', na.rm=TRUE) +
+geom_label(aes(x=frame_class, y=run_err, label = count_out_base), hjust = 0.25) +
+labs(title = 'Distribution of expected run estimates between Statcast and original model',
+x = 'Frame class', y = 'Expected run error')
+
+frame_24_tidy %>% 
+mutate(run_err = exp_run_added_2 - delta_run_exp,
+run_err_2 = exp_run_added_3 - delta_run_exp) %>% 
+ungroup() %>%
+group_by(frame_class) %>%
+mutate(mean_run_err_class = mean(run_err_2, na.rm=TRUE)) %>%
+arrange(frame_class) %>%
+ggplot() +
+geom_point(aes(y=run_err_2, x = frame_class, color = frame_class), show.legend = FALSE, na.rm = TRUE) +
+geom_line(aes(x=frame_class, y=mean_run_err_class, group=1), color = 'red', na.rm=TRUE) +
+geom_label(aes(x=frame_class, y=run_err_2, label = count_out_base), hjust = 0.25) +
+labs(title = 'Distribution of expected run estimates between Statcast and original model',
+x = 'Frame class', y = 'Expected run error') +
+ylim(-2,1.6)
+
+frame_24_tidy %>%
+mutate(run_err = exp_run_added_2 - delta_run_exp) %>% 
+group_by(count_out_base, post_count_out_base) %>%
+summarize(mean_run_err = mean(run_err, na.rm=TRUE),
+n = n()) %>%
+arrange(desc(mean_run_err)) %>%
+View()
+
+#catcher exp run plots
+best_sum_24 %>%
+mutate(exp_run_z = -1*exp_run_z,
+delta_run_exp_z = -1*delta_run_exp_z,
+last_name = str_extract(player_name, "^[^,]+")) %>%
+ggplot(aes(x=total_pitches, y = exp_run_z)) +
+geom_point(color = 'light green',show.legend = FALSE) +
+geom_label_repel(aes(label=last_name), size = 2.75, label.size=0.5) +
+labs(x = "Total pitches eligible for frame/miss", y = "Expected runs saved (z-score)", title = "Expected runs saved per pitch by catcher for the 2024 MLB Season", subtitle = "> 1500 frameable pitches seen")
+
+best_sum_24 %>%
+mutate(exp_run_z = -1*exp_run_z,
+delta_run_exp_z = -1*delta_run_exp_z,
+last_name = str_extract(player_name, "^[^,]+")) %>%
+ggplot(aes(x=total_pitches, y = delta_run_exp_z)) +
+geom_point(color = 'light red',show.legend = FALSE) +
+geom_label_repel(aes(label = last_name), size = 2.75, label.size = 0.5) +
+labs(x = "Total pitches eligible for frame/miss", y = "Statcast expected runs saved (z-score)", title = "Statcast expected runs saved per pitch by catcher for the 2024 MLB Season", subtitle = "> 1500 frameable pitches seen")
+
+best_sum_24 %>%
+mutate(exp_runs_saved = -1*exp_run_added,
+last_name = str_extract(player_name, "^[^,]+")) %>%
+ggplot(aes(x=frames_per_miss,y=exp_runs_saved)) +
+geom_point(color = 'magenta',show.legend = FALSE) +
+geom_label_repel(aes(label = last_name), size = 2.75, label.size = 0.5) +
+labs(x = "Frames/miss ratio", y = "Expected runs saved", title = "Frames per miss and expected runs saved by catchers for the 2024 MLB Season", subtitle = "> 1500 frameable pitches seen")
+# to make background transparent: theme(panel.background = element_rect(fill='transparent'))
+
+#NEED TO ADD THE REST OF THE 2024 DATA! Currently only using plays that lead to events, not every pitch, loading data from baseballr package for more efficient Statcast download
+#Initialize start and end dates, statcast list, and i for while loop to get 2024 data
+start_date <- as.Date('2024-03-28')
+end_date <- as.Date('2024-04-02')
+statcast_data <- list()
+i <- 1
+
+while (end_date <= as.Date('2024-09-30')) {
+# Create the df_name to hold pasted rows
+  df_name <- paste0("statcast_", i)
+# Retrieve data using statcast_search_batters
+  statcast_data[[df_name]] <- statcast_search_batters(start_date = start_date, end_date = end_date, batterid = NULL)
+  
+  start_date <- end_date + 1
+  end_date <- start_date + 2
+
+  i <- i + 1
+}
+
+#remove elements from statcast_data with no rows of data
+is_blank_rows <- function(df) {
+  nrow(df) > 0
+}
+
+statcast_filter <- Filter(is_blank_rows, statcast_data)
+
+#unlist and format statcast_data list
+statcast_filter <- bind_rows(statcast_filter)
+
+#classify out-count-baserunner state for each situation
+statcast_filter <- statcast_filter %>%
+mutate(out_state = outs_when_up,
+count = paste(balls,strikes,sep = '-'),
+base_state = case_when(
+!is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "bases_loaded",
+!is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "first_second",
+!is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "first_third",
+is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "second_third",
+!is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "first",
+is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "second",
+is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "third",
+is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "empty",
+TRUE ~ NA
+)
+)
+
+#classify result of AB (if run(s) scored)
+statcast_filter <- statcast_filter %>%
+mutate(
+runs_scored = post_bat_score - bat_score,
+count_out_base = paste(count,out_state,base_state,sep = ','),
+out_base = paste(out_state,base_state,sep = ' outs, '))
+
+#clean unnecessary columns from statcast_filter
+statcast_filter_tidy <- statcast_filter %>%
+select(c(pitch_type, game_date, player_name, pitcher, events, description, zone, des, stand, p_throws, home_team, away_team, type, bb_type, plate_x, plate_z, inning, inning_topbot, estimated_woba_using_speedangle, at_bat_number, bat_score, post_bat_score, delta_run_exp, out_state, count, base_state, runs_scored, count_out_base, out_base))
+
+#group innings in each game for each team to get exp runs per inn
+statcast_filter_tidy <- statcast_filter_tidy %>%
+group_by(game_date,home_team,inning,inning_topbot) %>%
+mutate(inning_id = cur_group_id()) %>%
+ungroup() %>%
+group_by(inning_id) %>%
+arrange(inning_id,desc(at_bat_number)) %>%
+mutate(inn_runs_scored = cumsum(runs_scored)) %>%
+ungroup()
+
+#get exp run prob for rest of inning 
+out_base_innV2 <- statcast_filter_tidy %>%
+group_by(out_base) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), 
+runs = sum(inn_runs_scored),
+median_runs = median(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+count_innV2 <- statcast_filter_tidy %>%
+group_by(count) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn) %>%
+filter(substr(count,1,1) != '4')
+
+base_innV2 <- statcast_filter_tidy %>%
+group_by(base_state) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+out_innV2 <- statcast_filter_tidy %>%
+group_by(out_state) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+count_out_base_innV2 <- statcast_filter_tidy %>%
+group_by(count_out_base) %>%
+summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = sum(inn_runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_inn)
+
+#exp_run_added_3 looks at marginal change in run expecatancy due to change in count-out-base "V2"  runner state model for each situation -- 3 outs means 0 expected runs per inning
+frame_24_tidy <- frame_24_tidy %>%
+left_join(count_out_base_innV2, by=c('count_out_base' = 'count_out_base')) %>%
+left_join(count_out_base_innV2, by=c('post_count_out_base' = 'count_out_base')) %>%
+mutate(exp_runs_per_inn.y = ifelse(post_outs==3,0,exp_runs_per_inn.y),
+exp_run_added_3 = exp_runs_per_inn.y - exp_runs_per_inn.x) %>%
+select(-starts_with("exp_runs_per_inn."), -starts_with("runs."), -starts_with("n."))
+
+#should be filtering above for misses and frames only (to not punish catchers for balls or reward for strikes)
+frame_24_tidy <- frame_24_tidy %>%
+mutate(edit_run_exp_change_3 = case_when(
+frame_class == 'ball' ~ NA,
+frame_class == 'strike' ~ NA,
+TRUE ~ exp_run_added_3))
+
+#improve best_sum_24 w/ added run_exp_change summary for each catcher
+best_sum_24 <- frame_24_tidy %>%
+group_by(player_name) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(edit_run_exp_change_3, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(edit_run_exp_change_3, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(best_sum_24$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(best_sum_24$exp_run_added_per_pitch, na.rm=TRUE)
+
+best_sum_24 <- best_sum_24 %>%
+mutate(exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 1500) %>%
+arrange(exp_run_added)
+
+#create separate count, out, and base state columns in count_out_base_innV2 for matrix
+count_out_base_innV2 <- count_out_base_innV2 %>%
+mutate(count = str_split_i(count_out_base, pattern=',', 1),
+outs = str_split_i(count_out_base, pattern=',', 2),
+base_state = str_split_i(count_out_base, pattern=',', 3)) %>%
+filter(count != '4-2')
+
+# Create function to generate matrix for each outs value 
+base_order <- c('bases_loaded', 'second_third', 'first_third', 'first_second', 'third', 'second', 'first', 'empty')
+
+generate_matrix <- function(df, outs_value, order) { 
+  matrix_data <- df %>% 
+    filter(outs == outs_value) %>%
+    mutate(base_state = factor(base_state, levels = order)) %>%
+    select(base_state, count,exp_runs_per_inn) %>%   
+    spread(key = count, value = exp_runs_per_inn) %>% 
+    mutate_if(is.numeric, round, 2) 
+  return(matrix_data) } 
+  
+# Generate matrices for outs = 0, 1, and 2 
+matrix_outs_0 <- generate_matrix(count_out_base_innV2, 0, base_order) 
+matrix_outs_1 <- generate_matrix(count_out_base_innV2, 1, base_order) 
+matrix_outs_2 <- generate_matrix(count_out_base_innV2, 2, base_order)
+
+#visualize matrix with heatmap
+visualize_matrix <- function(matrix_data, title) { 
+  matrix_data %>% 
+  gather(key = "count", value = "exp_runs_per_inn", -base_state) %>% 
+  ggplot(aes(x = count, y = base_state, fill = exp_runs_per_inn)) + 
+  geom_tile() + 
+  geom_text(aes(label = round(exp_runs_per_inn, 2))) + 
+  scale_fill_gradient(low = "red", high = "green") + 
+  ggtitle(title) + 
+  theme_minimal() +
+  theme(axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_text(size = 12))}
+  
+visualize_matrix(matrix_outs_0, "Outs = 0")
+visualize_matrix(matrix_outs_1, "Outs = 1")
+visualize_matrix(matrix_outs_2, "Outs = 2")
+
+#visualize run expectancy
+count_out_base_innV2 %>%
+mutate(count_out = substr(count_out_base,1,5),
+count = substr(count_out_base,1,3),
+out = substr(count_out_base,5,5),
+base_state = sapply(strsplit(count_out_base_innV2$count_out_base, ','), function(x) x[3])) %>%
+mutate(count_base = paste(count, base_state, sep = ',')) %>%
+ggplot(aes(x=count_out, y=exp_runs_per_inn)) +
+geom_point(aes(color = base_state)) +
+#geom_line(aes(color = count_base)) +
+theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+#exp runs PER AB analysis
+#out-baserunner and out-count-baserunner expected run matrices PER AB
+out_base_ab <- plays_24 %>%
+group_by(out_base) %>%
+summarize(exp_runs_per_ab = sum(runs_scored)/n(), runs = sum(runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_ab)
+
+count_out_base_ab <- plays_24 %>%
+group_by(count_out_base) %>%
+summarize(exp_runs_per_ab = sum(runs_scored)/n(), runs = sum(runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_ab) %>%
+filter(substr(count_out_base,1,1) != '4')
+
+#plot of out-baserunner state expected runs PER AB
+plays_24 %>%
+group_by(out_base) %>%
+summarize(exp_runs_per_ab = sum(runs_scored)/n(), runs = sum(runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_ab) %>%
+ggplot(aes(x=exp_runs_per_ab,y= fct_reorder(out_base,exp_runs_per_ab))) +
+geom_col(fill = 'maroon') +
+geom_label(aes(label = round(exp_runs_per_ab,digits=2)), size = 3, nudge_y = -0.025) +
+labs(x = 'Expected runs per AB',
+y= 'Out, baserunner state',
+title = 'Expected runs for each out-baserunner state in 2024 MLB games')
+
+#plot of expected runs by count PER AB
+plays_24 %>%
+group_by(count) %>%
+summarize(exp_runs_per_ab = sum(runs_scored)/n(), runs = sum(runs_scored),
+n = n()) %>%
+arrange(exp_runs_per_ab) %>%
+ggplot(aes(x=exp_runs_per_ab,y= fct_reorder(count,exp_runs_per_ab))) +
+geom_col(fill = 'navy') +
+geom_label(aes(label = round(exp_runs_per_ab,digits=2)), size = 3, nudge_y = -0.025) +
+labs(x = 'Expected runs per AB',
+y= 'At-bat count',
+title = 'Expected runs for each batter count in 2024 MLB games')
+
