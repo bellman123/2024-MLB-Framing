@@ -1,0 +1,365 @@
+---
+title: "MLB Expanded Run Expectancy"
+output: html_document
+date: "2025-01-21"
+---
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(ggrepel)
+library(rlang)
+library(caret)
+library(e1071)
+
+#install and load baseballr package for efficient statcast import
+if (!requireNamespace('pacman', quietly = TRUE)){
+  install.packages('pacman')
+}
+pacman::p_load_current_gh("billpetti/baseballr")
+
+#Initialize start and end dates, statcast list, and i for while loop to get 2024 data
+start_date <- as.Date('2023-03-23')
+end_date <- as.Date('2023-04-02')
+player_data <- list()
+i <- 1
+
+while (start_date <= as.Date('2023-09-30')) {
+# Create the df_name to hold pasted rows
+  df_name <- paste0("player_", i)
+# Retrieve data using statcast_search_batters
+  player_data[[df_name]] <- statcast_search_batters(start_date = start_date, end_date = end_date, batterid = NULL)
+  
+  start_date <- end_date + 1
+  end_date <- start_date + 2
+
+  i <- i + 1
+}
+
+#remove elements from pitcher_data with no rows of data
+is_blank_rows <- function(df) {
+  nrow(df) > 0
+}
+
+statcast_23_filter <- Filter(is_blank_rows, player_data)
+
+#unlist and format player_data list
+statcast_23_filter <- bind_rows(statcast_23_filter)
+
+#classify out-count-baserunner state for each situation
+statcast_23_filter <- statcast_23_filter %>%
+mutate(out_state = outs_when_up,
+count = paste(balls,strikes,sep = '-'),
+base_state = case_when(
+!is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "bases_loaded",
+!is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "first_second",
+!is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "first_third",
+is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "second_third",
+!is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "first",
+is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "second",
+is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "third",
+is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "empty",
+TRUE ~ NA
+)
+)
+
+#classify result of AB (if run(s) scored)
+statcast_23_filter <- statcast_23_filter %>%
+  mutate(runs_scored = post_bat_score - bat_score,
+    count_out_base = paste(count,out_state,base_state,sep = ','),
+    out_base = paste(out_state,base_state,sep = ' outs, '))
+
+#clean unnecessary columns from statcast_23_filter
+statcast_23_filter_tidy <- statcast_23_filter %>%
+  select(c(pitch_type, game_date, player_name, pitcher, events, 
+    description, zone, des, stand, p_throws, home_team, away_team, 
+    type, bb_type, plate_x, plate_z, inning, inning_topbot, 
+    estimated_woba_using_speedangle, at_bat_number, bat_score, 
+    post_bat_score, delta_run_exp, out_state, count, base_state, 
+    runs_scored, count_out_base, out_base))
+
+#group innings in each game for each team to get exp runs per inn
+statcast_23_filter_tidy <- statcast_23_filter_tidy %>%
+  group_by(game_date,home_team,inning,inning_topbot) %>%
+  mutate(inning_id = cur_group_id()) %>%
+  ungroup() %>%
+  group_by(inning_id) %>%
+  arrange(inning_id,desc(at_bat_number)) %>%
+  mutate(inn_runs_scored = cumsum(runs_scored)) %>%
+  ungroup()
+
+#2023 count_out_base_inn
+count_out_base_inn23 <- statcast_23_filter_tidy %>%
+  group_by(count_out_base) %>%
+    summarize(exp_runs_per_inn = sum(inn_runs_scored)/n(), runs = 
+    sum(inn_runs_scored),
+    n = n()) %>%
+  arrange(exp_runs_per_inn)
+
+#count_out_base_innV3 join with 2023
+count_out_base_innV23 <- count_out_base_inn23 %>%
+  right_join(count_out_base_innV3, 
+    by = 'count_out_base', 
+    suffix = c('_2024', '_2023')) %>%
+  mutate(exp_runs_per_inn = (exp_runs_per_inn_2024 +  
+    exp_runs_per_inn_2023)/2)
+    
+count_out_base_innV23 %>%
+  mutate(delta_exp_run = exp_runs_per_inn_2024 - exp_runs_per_inn_2023)
+%>%
+  ggplot(aes(x=, y=delta_exp_run)) +
+  geom_point()
+
+count_out_base_innV23 <- count_out_base_innV23 %>%
+  mutate(n = n_2024 + n_2023)
+#need to change methodology for exp_run_added_4 to be diff btw count-out-base when ball vs strike (instead of just difference between before and after pitch, since pitch has to occur regardless)
+#create count_out_base_innV3 to get run expectancy for counts when strike vs when ball and then join with frame_24_tidy through post_count_out_base and description (called_strike vs. ball) columns
+count_out_base_innV23_2 <- count_out_base_innV23
+
+#join count_out_base_innV3 w/ count_out_base_innV2 to get run diff for each count 
+count_out_base_innV23 <- count_out_base_innV23[,c(1:14,19)] %>%
+  left_join(count_out_base_innV23_2[,c(1,19)],by = c('if_ball_cob' = 
+    'count_out_base')) %>%
+  rename(exp_runs_if_ball = exp_runs_per_inn.y,
+    exp_runs_per_inn = exp_runs_per_inn.x) %>%
+  left_join(count_out_base_innV23_2[,c(1,19)],by = c('if_strike_cob' = 
+    'count_out_base')) %>%
+  rename(exp_runs_if_strike = exp_runs_per_inn.y,
+    exp_runs_per_inn = exp_runs_per_inn.x) %>%
+  mutate(exp_runs_if_strike = ifelse(is.na(exp_runs_if_strike),0, 
+    exp_runs_if_strike)) %>%
+  mutate(exp_run_added_frame = exp_runs_if_strike - exp_runs_if_ball,
+    exp_run_added_miss = exp_runs_if_ball - exp_runs_if_strike)
+    
+remove(count_out_base_innV23_2)
+
+#join new count_out_base_innV23 to frame_24_tidy to get new edit_run_exp_change5
+frame_24_tidy <- frame_24_tidy %>%
+left_join(count_out_base_innV23[,c(1,18:19)], by = 'count_out_base') %>%
+rename(exp_run_added_frame = exp_run_added_frame.x,
+exp_run_added_miss = exp_run_added_miss.x,
+exp_run_added_frame_23 = exp_run_added_frame.y,
+exp_run_added_miss_23 = exp_run_added_miss.y) %>% 
+mutate(edit_run_exp_change_5 = case_when(
+frame_class == 'miss' ~ exp_run_added_miss_23,
+frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame' ~ exp_run_added_frame_23,
+TRUE ~ NA
+))
+
+#new best_sum_24
+best_sum_23_24 <- frame_24_tidy %>%
+group_by(player_name) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(edit_run_exp_change_5, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(edit_run_exp_change_5, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(best_sum_23_24$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(best_sum_23_24$exp_run_added_per_pitch, na.rm=TRUE)
+
+best_sum_23_24 <- best_sum_23_24 %>%
+mutate(runs_saved_abv_avg = round(-1*(best_sum_23_24$exp_run_added)+mean(best_sum_23_24$exp_run_added), digits=2),
+exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 1500) %>%
+arrange(exp_run_added)
+
+best_sum_23_24 <- best_sum_23_24[,c(1:9,12:16,10,11)]
+
+# Create function to generate matrix for each outs value 
+base_order <- c('bases_loaded', 'second_third', 'first_third', 'first_second', 'third', 'second', 'first', 'empty')
+
+generate_matrix <- function(df, outs_value, order) { 
+  matrix_data <- df %>% 
+    filter(outs == outs_value) %>%
+    mutate(base_state = factor(base_state, levels = order)) %>%
+    select(base_state, count,exp_runs_per_inn) %>%   
+    spread(key = count, value = exp_runs_per_inn) %>% 
+    mutate_if(is.numeric, round, 2) 
+  return(matrix_data) } 
+  
+# Generate matrices for outs = 0, 1, and 2 
+matrix_outs_0 <- generate_matrix(count_out_base_innV23, 0, base_order) 
+matrix_outs_1 <- generate_matrix(count_out_base_innV23, 1, base_order) 
+matrix_outs_2 <- generate_matrix(count_out_base_innV23, 2, base_order)
+
+#visualize matrix with heatmap
+visualize_matrix <- function(matrix_data, title) { 
+  matrix_data %>% 
+  gather(key = "count", value = "exp_runs_per_inn", -base_state) %>% 
+  ggplot(aes(x = count, y = base_state, fill = exp_runs_per_inn)) + 
+  geom_tile() + 
+  geom_text(aes(label = round(exp_runs_per_inn, 2)), size=4.75) +
+  scale_fill_gradient(low = "red", high = "green") + 
+  ggtitle(title) + 
+  theme_minimal() +
+  theme(axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_text(size = 12))}
+  
+visualize_matrix(matrix_outs_0, "Outs = 0")
+visualize_matrix(matrix_outs_1, "Outs = 1")
+visualize_matrix(matrix_outs_2, "Outs = 2")
+
+#probabilistic frames and misses based on pitch type and location
+frame_24_tidy <- frame_24_tidy %>% 
+  mutate(pitch_type = as.factor(pitch_type),
+    description = as.factor(description),
+    pitch_class = as.factor(pitch_class))
+    
+ggplot(frame_24_tidy, aes(x=plate_x, y = plate_z, color=description)) +
+geom_point()
+
+frame_24_no_outliers <- frame_24_tidy %>%
+filter(plate_x < 3 & plate_x > -3 & plate_z < 6 & plate_z > -2)
+  
+ggplot(frame_24_no_outliers, aes(x=plate_x, y=plate_z, color=description)) +
+geom_point()  
+  
+#undersampling method
+# Set seed for reproducibility
+set.seed(47)
+
+# Train-test split
+trainIndex <- createDataPartition(frame_24_tidy$description, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+prob_dataTrain <- frame_24_tidy[trainIndex,]
+prob_dataTest  <- frame_24_tidy[-trainIndex,]
+
+# Standardize the training data
+train_means <- colMeans(prob_dataTrain[, c("plate_x", "plate_z")])
+train_sds <- apply(prob_dataTrain[, c("plate_x", "plate_z")], 2, sd)
+
+prob_dataTrain[, c("plate_x", "plate_z")] <- scale(prob_dataTrain[, c("plate_x", "plate_z")], 
+                                                   center = train_means, 
+                                                   scale = train_sds)
+
+# Apply the same scaling to the test data
+prob_dataTest[, c("plate_x", "plate_z")] <- scale(prob_dataTest[, c("plate_x", "plate_z")], 
+                                                  center = train_means, 
+                                                  scale = train_sds)
+
+# Separate the majority (balls) and minority (called_strike) classes
+majority <- prob_dataTrain[prob_dataTrain$description == "ball", ]
+minority <- prob_dataTrain[prob_dataTrain$description == "called_strike", ]
+
+# Determine the size of the minority class
+minority_size <- nrow(minority)
+
+# Randomly sample from the majority class to match the minority class size
+majority_undersampled <- majority[sample(nrow(majority), minority_size), ]
+
+# Combine the undersampled majority class with the minority class
+prob_dataTrain_undersampled <- rbind(majority_undersampled, minority)
+
+# Train the model on the undersampled dataset
+prob_model_undersampled <- train(description ~ plate_x*stand + plate_z + pitch_class, 
+                                 data = prob_dataTrain_undersampled, 
+                                 method = "glm", 
+                                 family = "binomial")
+
+# Predict probabilities on test data
+prob_predictions <- predict(prob_model_undersampled, newdata = prob_dataTest, type = "prob")
+
+# Evaluate the model on the test data
+predictions_undersampled <- predict(prob_model_undersampled, newdata = prob_dataTest)
+confusionMatrix(predictions_undersampled, prob_dataTest$description)
+
+# Define class weights
+class_weights <- ifelse(prob_dataTrain$description == "called_strike", 
+                        nrow(prob_dataTrain) / 
+                        sum(prob_dataTrain$description == "called_strike"), 
+                        nrow(prob_dataTrain) / 
+                        sum(prob_dataTrain$description == "ball"))
+
+# Train the model with class weights
+prob_model_weighted <- train(description ~ plate_x*stand + plate_z + zone, 
+                             data = prob_dataTrain, 
+                             method = "glm", 
+                             family = "binomial", 
+                             weights = class_weights)
+
+# Predict probabilities on test data
+prob_predictions_weighted <- predict(prob_model_weighted, newdata = prob_dataTest, type = "prob")
+
+# Evaluate the model on the test data
+predictions_weighted <- predict(prob_model_weighted, newdata = 
+prob_dataTest)
+confusionMatrix(predictions_weighted, prob_dataTest$description)
+
+
+# Get the probability for the 'called_strike' class
+frame_24_tidy1 <- frame_24_tidy
+
+frame_24_tidy1[, c("plate_x", "plate_z")] <- scale(frame_24_tidy1[, c("plate_x", "plate_z")], 
+                                                  center = train_means, 
+                                                  scale = train_sds)
+
+probabilities <- predict(prob_model_weighted, newdata = frame_24_tidy1, type = "prob")
+
+# Add the probability to the test data
+frame_24_tidy1 <- frame_24_tidy1 %>% 
+  mutate(prob_called_strike = probabilities$called_strike)
+  
+predictions_weighted <- predict(prob_model_weighted, newdata = 
+frame_24_tidy1)
+confusionMatrix(predictions_weighted, frame_24_tidy1$description)
+
+
+ggplot(frame_24_tidy1, aes(x=plate_x, y = plate_z, color=description)) +
+geom_point()
+ 
+ggplot(frame_24_tidy1, aes(x = plate_x, y = plate_z, color = prob_called_strike)) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(x = "Plate X Coordinate", 
+       y = "Plate Z Coordinate")
+       
+# create new edit_run_exp_change_6
+frame_24_tidy1 <- frame_24_tidy1 %>%
+mutate(edit_run_exp_change_6 = ifelse(frame_class != 'miss', edit_run_exp_change_5*(1-prob_called_strike),
+edit_run_exp_change_5*prob_called_strike))
+
+best_sum_prob <- frame_24_tidy1 %>%
+group_by(player_name) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(edit_run_exp_change_6, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(edit_run_exp_change_6, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(best_sum_prob$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(best_sum_prob$exp_run_added_per_pitch, na.rm=TRUE)
+
+best_sum_prob <- best_sum_prob %>%
+mutate(runs_saved_abv_avg = round(-1*exp_run_added+mean(best_sum_prob$exp_run_added), digits=2),
+exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 1500) %>%
+arrange(exp_run_added)
+
+best_sum_prob <- best_sum_prob[,c(1:4,12,5:9,13:16,10,11)]
+
+best_sum_prob %>% 
+  mutate(exp_run_saved_per_pitch = round(-1*exp_run_added_per_pitch, 
+    digits=4), 
+    exp_run_saved_z = round(-1*exp_run_z, digits=3)) %>%
+  select(c(player_name, runs_saved_abv_avg, exp_run_saved_per_pitch)) %>%
+  View()

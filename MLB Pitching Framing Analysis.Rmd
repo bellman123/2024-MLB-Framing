@@ -1,0 +1,272 @@
+---
+title: "MLB Framing Pitcher Analysis"
+output: html_document
+date: "2025-01-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+------------------------------------------------------------------------------
+#load packages
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(ggrepel)
+library(rlang)
+
+#install and load baseballr package for efficient statcast import
+if (!requireNamespace('pacman', quietly = TRUE)){
+  install.packages('pacman')
+}
+pacman::p_load_current_gh("billpetti/baseballr")
+
+#due to sheer amount of N/As in cather framing data, have to query Statcast using baseballr package
+#Initialize start and end dates, statcast list, and i for while loop to get 2024 data
+start_date <- as.Date('2024-03-28')
+end_date <- as.Date('2024-04-02')
+pitcher_data <- list()
+i <- 1
+
+while (start_date <= as.Date('2024-09-30')) {
+# Create the df_name to hold pasted rows
+  df_name <- paste0("pitcher_", i)
+# Retrieve data using statcast_search_batters
+  pitcher_data[[df_name]] <- statcast_search_pitchers(start_date = start_date, end_date = end_date, pitcherid = NULL)
+  
+  start_date <- end_date + 1
+  end_date <- start_date + 2
+
+  i <- i + 1
+}
+
+#remove elements from pitcher_data with no rows of data
+is_blank_rows <- function(df) {
+  nrow(df) > 0
+}
+
+pitcher_filter <- Filter(is_blank_rows, pitcher_data)
+
+#unlist and format pitcher_data list
+pitcher_filter <- bind_rows(pitcher_filter)
+
+#clean and filter out non-frameable pitches from pitcher_filter
+pitcher_filter_tidy <- pitcher_filter %>%
+filter(description == 'called_strike' | description == 'ball') %>%
+mutate(count = paste(balls, strikes, sep='-'),
+base_state = case_when(
+      !is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "bases_loaded",
+      !is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "first_second",
+      !is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "first_third",
+      is.na(on_1b) & !is.na(on_2b) & !is.na(on_3b) ~ "second_third",
+      !is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "first",
+      is.na(on_1b) & !is.na(on_2b) & is.na(on_3b) ~ "second",
+      is.na(on_1b) & is.na(on_2b) & !is.na(on_3b) ~ "third",
+      is.na(on_1b) & is.na(on_2b) & is.na(on_3b) ~ "empty",
+      TRUE ~ NA
+),
+outs = outs_when_up,
+post_balls = if_else(description == 'ball', balls + 1, balls),
+post_strikes = if_else(description == 'called_strike', strikes + 1, strikes),
+post_count = paste(post_balls, post_strikes, sep='-'),
+count_out_base = paste(count,outs_when_up,base_state,sep = ','),
+out_base = paste(outs_when_up,base_state,sep = ' outs, ')) %>%
+select(c(pitch_type, game_date, player_name, pitcher, events, description, zone, des, stand, p_throws, home_team, away_team, type, bb_type, plate_x, plate_z, fielder_2, inning, inning_topbot, estimated_woba_using_speedangle, at_bat_number, bat_score, post_bat_score, delta_run_exp, outs_when_up, count, base_state, outs, count_out_base, out_base, post_balls, post_strikes, post_count))
+
+#get frame_class in order to join count_out_baseV3 to get run exp for pitchers
+#zone according to statcast goes from -.83 <= plate_x <= .83 and 1.11 <= plate_z <= 4.2, so 2 inches from each side of plate would give range of ~ [-.7,.7] for x
+pitcher_filter_tidy <- pitcher_filter_tidy %>%
+mutate(frame_class = case_when(
+description == 'called_strike' & (plate_x <= -0.7 | plate_x >= 0.7 | plate_z <= 1.65 | plate_z >= 3.5) ~ "frame",
+description == 'ball' & zone != 11 & zone != 12 & zone != 13 & zone != 14 ~ "miss",
+description == 'ball' & (zone == 11 | zone == 12 | zone == 13 | zone == 14) ~ "ball",
+TRUE ~ "strike"
+),
+post_base_state = case_when(
+  substr(post_count,1,1) == '4' & base_state == 'empty' ~ 'first',
+  substr(post_count,1,1) == '4' & base_state == 'first' ~ 'first_second',
+  substr(post_count,1,1) == '4' & base_state == 'second' ~ 'first_second',
+  substr(post_count,1,1) == '4' & base_state == 'third' ~ 'first_third',
+  substr(post_count,1,1) == '4' & base_state == 'first_second' ~ 'bases_loaded',
+  substr(post_count,1,1) == '4' & base_state == 'first_third' ~ 'bases_loaded',
+  substr(post_count,1,1) == '4' & base_state == 'second_third' ~ 'bases_loaded',
+  substr(post_count,1,1) == '4' & base_state == 'bases_loaded' ~ 'scored',
+  TRUE ~ base_state
+))
+
+#join count_out_baseinnV3 to get run exp change for pitchers
+pitcher_filter_tidy <- pitcher_filter_tidy %>%
+left_join(count_out_base_innV3, by = 'count_out_base') %>%
+select(c(-count.y,-outs.y,-base_state.y,-if_ball_cob,-if_strike_cob,-exp_runs_if_ball,-exp_runs_if_strike)) %>% mutate(run_exp_change = case_when(
+frame_class == 'miss' ~ exp_run_added_miss,
+frame_class == 'frame' ~ exp_run_added_frame,
+TRUE ~ NA
+))
+
+#get catcher names from player_id
+player_id <- player_id %>%
+select(c(key_mlbam, name_last, name_first)) %>%
+mutate(name = paste(name_last, name_first, sep = ', '))
+
+pitcher_filter_tidy <- pitcher_filter_tidy %>%
+left_join(player_id, by = c('fielder_2' = 'key_mlbam')) %>%
+select(c(-name_last,-name_first)) 
+
+pitcher_filter_tidy <- pitcher_filter_tidy %>%
+rename(catcher = name)
+
+#summarize pitcher_filter_tidy for grouping by pitcher
+pitcher_sum <- pitcher_filter_tidy %>%
+group_by(player_name) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(run_exp_change, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(run_exp_change, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(pitcher_sum$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(pitcher_sum$exp_run_added_per_pitch, na.rm=TRUE)
+
+pitcher_sum <- pitcher_sum %>%
+mutate(exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 100) %>%
+arrange(exp_run_added)
+
+#summarize pitcher_filter_tidy for grouping by pitcher and catcher
+pitcher_sum_24 <- pitcher_filter_tidy %>%
+group_by(player_name,catcher) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(run_exp_change, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(run_exp_change, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(pitcher_sum_24$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(pitcher_sum_24$exp_run_added_per_pitch, na.rm=TRUE)
+
+pitcher_sum_24 <- pitcher_sum_24 %>%
+mutate(exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 150) %>%
+arrange(exp_run_added)
+
+#remake best_sum_24(v2) to check results from earlier dataset
+best_sum_24v2 <- pitcher_filter_tidy %>%
+group_by(catcher) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(run_exp_change, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(run_exp_change, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch <- mean(best_sum_24v2$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(best_sum_24v2$exp_run_added_per_pitch, na.rm=TRUE)
+
+best_sum_24v2 <- best_sum_24v2 %>%
+mutate(runs_saved_abv_avg = round(-1*(best_sum_24v2$exp_run_added)+mean(best_sum_24v2$exp_run_added), digits=2),
+exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 100) %>%
+arrange(exp_run_added)
+
+#function to analyze pitcher performance in absence of each catcher
+without_catcher <- function(data) {
+  data_split <- data %>%
+    group_by(player_name) %>%
+    group_split()
+  
+  result <- map_dfr(data_split, function(player_data) {
+    player_name <- unique(player_data$player_name)
+    catchers <- unique(player_data$catcher)
+    
+    map_dfr(catchers, function(catcher) {
+      excluded_data <- filter(player_data, catcher != !!catcher)
+      if(nrow(excluded_data) > 0) {
+        tibble(
+          player_name = player_name,
+          excluded_catcher = catcher,
+          mean_exp_run_added_per_pitch = mean(excluded_data$exp_run_added_per_pitch, na.rm = TRUE),
+          sd_exp_run_added_per_pitch = sd(excluded_data$exp_run_added_per_pitch, na.rm = TRUE)
+        )
+      } else {
+        tibble(
+          player_name = player_name,
+          excluded_catcher = catcher,
+          mean_exp_run_added_per_pitch = NA,
+          sd_exp_run_added_per_pitch = NA
+        )
+      }
+    })
+  })
+  
+  return(result)
+}
+
+# Perform the analysis
+without_result <- without_catcher(pitcher_sum_24)
+#join without_result to pitcher_sum_24 to get difference in values for each catcher when excluded
+without_result <- without_result %>%
+left_join(best_sum_24[,c(1,9)], by=c('excluded_catcher'='player_name'),relationship="many-to-many") %>%
+mutate(excl_catcher_runs_added = exp_run_added_per_pitch - mean_exp_run_added_per_pitch) %>%
+filter(!is.na(mean_exp_run_added_per_pitch) & !is.na(exp_run_added_per_pitch)) %>%
+rename(excl_catcher_run_per_pitch = exp_run_added_per_pitch) %>%
+mutate(excl_catcher_runs_added = round(excl_catcher_runs_added, digits = 5)) 
+
+without_result <- without_result %>%
+mutate(excl_catcher_runs_z = (excl_catcher_runs_added - mean(without_result$excl_catcher_runs_added))/sd(without_result$excl_catcher_runs_added)) %>%
+left_join(pitcher_sum_24[,c(1,2,10)],by=c('excluded_catcher' = 'catcher','player_name'),relationship="one-to-one")
+
+#summarize without_result by catcher to get average run differential from when they're catching vs not catching
+without_summary <- without_result %>%
+group_by(excluded_catcher) %>%
+summarize(excl_runs_added_z_mean = weighted.mean(excl_catcher_runs_z,total_pitches),
+excl_catcher_run_diff_mean = weighted.mean(excl_catcher_runs_added, total_pitches),
+runs_added_without_excl_mean = mean(mean_exp_run_added_per_pitch),
+excl_catcher_run_per_pitch = mean(excl_catcher_run_per_pitch)) %>%
+arrange(excl_runs_added_z_mean)
