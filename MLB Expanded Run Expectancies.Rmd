@@ -7,6 +7,7 @@ library(tidyverse)
 library(ggplot2)
 library(data.table)
 library(ggrepel)
+library(xtable)
 library(rlang)
 library(caret)
 library(e1071)
@@ -329,6 +330,9 @@ frame_24_tidy1 <- frame_24_tidy1 %>%
 mutate(edit_run_exp_change_6 = ifelse(frame_class != 'miss', edit_run_exp_change_5*(1-prob_called_strike),
 edit_run_exp_change_5*prob_called_strike))
 
+frame_24_tidy1 <- frame_24_tidy1 %>%
+  mutate(catcher_team = ifelse(inning_topbot == 'Top', home_team, away_team))
+
 best_sum_prob <- frame_24_tidy1 %>%
 group_by(player_name) %>%
 mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
@@ -336,7 +340,7 @@ summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'r
 tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
 exp_run_added = round(sum(edit_run_exp_change_6, na.rm = TRUE), digits=2),
 frames_per_miss = round(tot_frames/tot_misses, digits=2),
-frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()), digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame' | frame_class == 'ball'),1,0))), digits=2),
 miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
 exp_run_added_per_pitch = sum(edit_run_exp_change_6, na.rm = TRUE)/n(),
 total_pitches = n(),
@@ -363,3 +367,74 @@ best_sum_prob %>%
     exp_run_saved_z = round(-1*exp_run_z, digits=3)) %>%
   select(c(player_name, runs_saved_abv_avg, exp_run_saved_per_pitch)) %>%
   View()
+  
+#best_sum_team for best_sum_prob for each team instead of by catcher
+best_sum_team <- frame_24_tidy1 %>%
+group_by(catcher_team) %>%
+mutate(delta_run_exp_edit = ifelse(frame_class == 'ball'|frame_class == 'strike',0, delta_run_exp)) %>%
+summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
+tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
+exp_run_added = round(sum(edit_run_exp_change_6, na.rm = TRUE), digits=2),
+frames_per_miss = round(tot_frames/tot_misses, digits=2),
+frame_perc = round(100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame' | frame_class == 'ball'),1,0))), digits=2),
+miss_perc = round(100*sum(ifelse(frame_class == 'miss',1,0))/sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)), digits=2),
+exp_run_added_per_pitch = sum(edit_run_exp_change_6, na.rm = TRUE)/n(),
+total_pitches = n(),
+delta_run_exp = sum(delta_run_exp_edit, na.rm=TRUE),
+delta_run_exp_per_pitch = sum(delta_run_exp_edit, na.rm=TRUE)/n())
+
+mean_exp_run_added_per_pitch_team <- mean(best_sum_team$exp_run_added_per_pitch, na.rm=TRUE)
+sd_exp_run_added_per_pitch <- sd(best_sum_team$exp_run_added_per_pitch, na.rm=TRUE)
+
+best_sum_team <- best_sum_team %>%
+mutate(runs_saved_abv_avg = round(-1*exp_run_added+mean(best_sum_team$exp_run_added), digits=2),
+exp_run_z = (exp_run_added_per_pitch - mean_exp_run_added_per_pitch)/sd_exp_run_added_per_pitch,
+delta_run_exp_z = (delta_run_exp_per_pitch - mean(delta_run_exp_per_pitch))/sd(delta_run_exp_per_pitch),
+frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
+miss_z = (miss_perc - mean(miss_perc))/sd(miss_perc)) %>%
+filter(total_pitches >= 1500) %>%
+arrange(exp_run_added)
+
+best_sum_team <- best_sum_team[,c(1:4,12,5:9,13:16,10,11)]
+
+best_sum_team %>% 
+  mutate(exp_run_saved_per_pitch = round(-1*exp_run_added_per_pitch, 
+    digits=4), 
+    exp_run_saved_z = round(-1*exp_run_z, digits=3)) %>%
+  select(c(catcher_team, runs_saved_abv_avg, frames_per_miss)) %>%
+  View()
+  
+#LaTex text files for full dataframes
+best_sum_latex <- best_sum_prob[,c(1,5:10)] %>%
+  mutate(exp_run_added_per_pitch = -1*round(exp_run_added_per_pitch - mean_exp_run_added_per_pitch, digits=5))
+  
+addLines <- list()
+row_count <- nrow(best_sum_latex)
+addLines$pos <- list(-1, seq_len(row_count))  
+# Adds \hline before the header and after each row
+addLines$command <- c("\\hline\n", rep("\\hline\n", row_count))  
+#Repeats for all rows
+
+sink("best_sum_prob.tex")
+print(xtable(best_sum_latex, digits = c(0,0,2,2,2,2,5,0)), type = "latex", add.to.row = addLines)
+sink()
+remove(best_sum_latex)
+remove(addLines)
+
+best_sum_latex <- best_sum_team[, c(1:3,5:10)] %>%
+  mutate(exp_run_added_per_pitch = -1*round(exp_run_added_per_pitch - mean_exp_run_added_per_pitch_team, digits=5))
+
+sink("best_sum_team.tex")
+print(xtable(best_sum_latex, digits = c(0,0,0,0,2,2,2,2,5,0)), type = "latex")
+sink()
+remove(best_sum_latex)
+
+#state bias latex
+state_bias_latex <- state_bias %>%
+  mutate(run_bias_pct = round(run_bias_pct, digits = 2))
+
+sink("state_bias.tex")
+print(xtable(state_bias_latex, digits = c(0,0,2,2)), type = "latex")
+sink()
+remove(state_bias_latex)
+  

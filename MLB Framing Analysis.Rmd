@@ -203,14 +203,14 @@ frame_24 <- bind_rows(catchers, catcher_strikes)
 best_sum_old <- frame_24_tidy %>%
 group_by(player_name) %>%
 summarize(tot_frames = sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0)),
-frame_perc = 100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/n()),
+frame_perc = 100*(sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame'),1,0))/sum(ifelse((frame_class == 'nm_frame' | frame_class == 'robbery' | frame_class == 'frame' | frame_class == 'ball'),1,0))),
 miss_perc = 100*sum(ifelse(frame_class == 'miss',1,0))/
 sum(ifelse((frame_class == 'strike' | frame_class == 'frame' | frame_class == 'miss'),1,0)),
 tot_misses = sum(ifelse(frame_class == 'miss',1,0)),
 total_pitches = n()
 ) %>%
 filter(total_pitches >= 1500) %>%
-arrange(desc(frame_perc))
+arrange(desc(frame_perc)) %>% View()
 
 best_sum_old <- best_sum_old %>%
 mutate(frame_z = (frame_perc - mean(frame_perc))/sd(frame_perc),
@@ -541,7 +541,7 @@ geom_point(color = 'magenta',show.legend = FALSE) +
 geom_label_repel(aes(label = last_name), size = 2.75, label.size = 0.5) +
 labs(x = "Frames/miss ratio", y = "Expected runs saved", title = "Frames per miss and expected runs saved by catchers for the 2024 MLB Season", subtitle = "> 1500 frameable pitches seen")
 
-best_sum_24 %>%
+best_sum_prob %>%
 mutate(exp_run_z = -1*exp_run_z,
 delta_run_exp_z = -1*delta_run_exp_z,
 last_name = str_extract(player_name, "^[^,]+")) %>%
@@ -752,10 +752,10 @@ arrange(exp_run_added)
 best_sum_24 <- best_sum_24[,c(1:9,12:16,10,11)]
 
 #graph best_sum_24
-best_sum_24 %>%
+best_sum_prob %>%
 mutate(last_name = str_extract(player_name, "^[^,]+")) %>%
 ggplot(aes(x=frame_z,y=miss_z)) +
-geom_point(aes(color = last_name), show.legend = FALSE) +
+geom_point(show.legend = FALSE) +
 geom_label_repel(aes(label=last_name), size = 3.3, label_size = 0.5, nudge_y = -0.055) +
 labs(x = "Framing z-score", y = "Misses z-score (lower = less misses)") +
 theme(
@@ -805,4 +805,132 @@ visualize_matrix(matrix_outs_1, "Outs = 1")
 visualize_matrix(matrix_outs_2, "Outs = 2")
 
 #see how sample of counts faced by catchers may have biased results
-frame_24_tidy %>% group_by(player_name)
+pitch_limit_list <- best_sum_prob %>%
+  filter(total_pitches >= 1500) %>%
+  select(player_name)
+
+state_bias_summary <- frame_24_tidy1 %>%
+#  filter(frame_class != "ball" & frame_class != "strike") %>%
+#  filter(player_name %in% pitch_limit_list$player_name) %>%
+  group_by(player_name, count_out_base) %>%
+  summarize(n = n()) %>%
+  ungroup() %>%
+  group_by(player_name) %>%
+  mutate(perc_of_app = n/sum(n),
+    outs = substring(count_out_base, 5,5))
+    
+state_bias_summary_avg <- state_bias_summary %>%
+  bind_rows(state_bias_summary %>%
+    ungroup() %>%
+    group_by(count_out_base) %>%
+    mutate(outs = as.numeric(outs)) %>%
+    summarize(across(where(is.numeric), median)) %>%
+    mutate(player_name = 'Catcher, Average') %>%
+  select(player_name, everything()) %>%
+  mutate(outs = as.character(outs))
+)
+
+#to apply average catcher state mix, need to join estimated runs per pitch (frame and miss) for each state to state avg data, join avg pitch probabilities for each state, then build function with inputs of number of pitches, and catcher frame/miss rates to get expected runs saved stat
+avg_prob_by_state <- frame_24_tidy1 %>%
+  ungroup() %>%
+  group_by(player_name, count_out_base) %>%
+  summarize(mean_prob = mean(prob_called_strike),
+  n = n(),
+  mean_frame_r = sum(ifelse(frame_class=='frame'|frame_class=='nm_frame'|frame_class=='robbery',1,0))/n,
+  mean_miss_r = sum(ifelse(frame_class=='miss',1,0))/n)
+
+state_bias_summary_avg <- state_bias_summary_avg %>%
+  left_join(count_out_base_innV23[,c(1,18,19)], by = 'count_out_base') %>%
+  left_join(avg_prob_by_state[,c(1:3,5,6)],  by = c('player_name','count_out_base'))
+  
+state_avg_mix <- state_bias_summary_avg %>%
+  filter(str_detect(player_name,"Average"))
+  
+state_bias_summary_avg <- state_bias_summary_avg %>% 
+  left_join(state_avg_mix[,c(2,4)], by = 'count_out_base', suffix = c('_p','_avg')) 
+  
+remove(state_avg_mix)
+
+#test run estimator for each player
+n_pitch <- 7500
+
+state_bias <- state_bias_summary_avg %>%
+  left_join(best_sum_prob[,c(1,10)],by='player_name') %>%
+  filter(player_name %in% pitch_limit_list$player_name) %>%
+  ungroup() %>%
+  group_by(player_name, count_out_base) %>%
+  summarize(runs_saved_frame = -1*(1 - mean_prob)*mean_frame_r*exp_run_added_frame*perc_of_app_avg,
+  runs_saved_miss = -1*(mean_prob)*mean_miss_r*exp_run_added_miss*perc_of_app_avg,
+  total_pitches = total_pitches) %>%
+  ungroup() %>%
+  group_by(player_name) %>%
+  summarize(runs_saved_est = n_pitch* sum(runs_saved_frame,runs_saved_miss)) %>%
+  arrange(desc(runs_saved_est)) %>%
+  mutate(runs_saved_abv_avg = runs_saved_est - mean(.$runs_saved_est)) %>%
+  unique() %>%
+  select(-runs_saved_est)
+
+#state_bias by pitch (for overall bias percent from actual)
+state_bias_pitch <- state_bias_summary_avg %>%
+  filter(player_name %in% pitch_limit_list$player_name) %>%
+  ungroup() %>%
+  group_by(player_name, count_out_base) %>%
+  summarize(runs_saved_frame = -1*(1 - mean_prob)*mean_frame_r*exp_run_added_frame*perc_of_app_avg,
+  runs_saved_miss = -1*(mean_prob)*mean_miss_r*exp_run_added_miss*perc_of_app_avg) %>%
+  ungroup() %>%
+  group_by(player_name) %>%
+  summarize(runs_saved_est = sum(runs_saved_frame,runs_saved_miss)) %>%
+  arrange(desc(runs_saved_est)) %>%
+  mutate(runs_saved_abv_avg = runs_saved_est - mean(.$runs_saved_est)) %>%
+  select(-runs_saved_est) %>%
+  left_join(best_sum_prob[,c(1,9:10)], by='player_name') %>%
+  mutate(run_bias = round(runs_saved_abv_avg + exp_run_added_per_pitch, digits = 5),
+    run_bias_pct = round(100*run_bias/exp_run_added_per_pitch, digits=3))
+    
+state_bias <- state_bias %>%
+  left_join(state_bias_pitch[,c(1,6)], by = 'player_name') %>%
+  mutate(runs_saved_abv_avg = round(runs_saved_abv_avg, digits=2))
+  
+remove(state_bias_pitch)
+
+#function to calculate exp runs saved based on catcher frame/miss rates w/ avg catcher state mix and avg pitch prob(?)
+
+exp_runs_calc <- function(player, n_pitch = 7500) {
+  player_runs_calc <- data.frame()
+  
+  player_runs_calc <- state_bias_summary_avg %>%
+  filter(player_name == player) %>%
+  ungroup() %>%
+  group_by(player_name, count_out_base) %>%
+  summarize(runs_saved_frame = -1*(1 - mean_prob)*mean_frame_r*exp_run_added_frame*n_pitch*perc_of_app_avg,
+  runs_saved_miss = -1*(mean_prob)*mean_miss_r*exp_run_added_miss*n_pitch*perc_of_app_avg) %>%
+  ungroup() %>%
+  group_by(player_name) %>%
+  summarize(runs_saved_est = sum(runs_saved_frame,runs_saved_miss))
+  
+  return(player_runs_calc)
+}
+
+#summary of state_bias_summary to get variance by count
+state_bias_summary_avg %>%
+#  filter(outs == 0) %>%
+  ggplot(aes(x=player_name, y=perc_of_app, fill=count_out_base)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~outs) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none") +
+  labs(x = "Player", y = "Percent of all appearances")
+  
+
+#CONCLUSION graphic
+best_sum_prob %>%
+  ggplot(aes(x = runs_saved_abv_avg)) +
+  geom_histogram(aes(y = cumsum(..count..)), fill = 'white') +
+  stat_bin(aes(y = cumsum(..count..)), geom = 'line', color = 'blue') +
+  theme_minimal()
+  
+best_sum_prob %>%
+  ggplot(aes(x = runs_saved_abv_avg)) +
+  geom_histogram()
+  stat_bin(aes(y = cumsum(..count..)), geom = 'line', color = 'blue')

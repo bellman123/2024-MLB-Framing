@@ -1,0 +1,19 @@
+---
+title: "MLB Framing Analysis p2 -- Probabilistic Model"
+output: html_document
+date: "2024-12-17"
+---
+
+#load required packages
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(ggrepel)
+
+#visualize pitch distribution from statcast pull from statcast_tidy_24 (main dataset)
+statcast_filter_tidy %>% filter(description=='called_strike'|description == 'ball') %>% ggplot(aes(x=plate_x,y=plate_z)) + geom_point(aes(color=description)) + xlim(-2.5,2.5) + ylim(-1.5,6)
+
+#assign probability of strike based on position of pitch
+
+
+
